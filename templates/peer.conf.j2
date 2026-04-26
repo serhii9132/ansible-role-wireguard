@@ -9,5 +9,5 @@ DNS = {{ wireguard_dns }}
 PublicKey = {{ __wireguard_server_public_key.stdout }}
 Endpoint = {{ ansible_default_ipv4.address }}:{{ wireguard_server_port }}
 AllowedIPs = {{ wireguard_peers_allowed_ips }}
-PersistentKeepalive = 25
+PersistentKeepalive = {{ __wireguard_persistent_keep_alive }}
 PresharedKey = {{ __wireguard_peer_pre_shared_key.results[idx].stdout }}
