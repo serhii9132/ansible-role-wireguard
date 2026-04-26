@@ -1,0 +1,114 @@
+#!/bin/bash
+
+WG_CONF="/etc/wireguard/{{ __wireguard_interface }}.conf"
+PEERS_DIR="{{ __wireguard_root_dir_peer_conf }}"
+NETWORK_PREFIX="{{ wireguard_server_ip.split('/')[0].split('.')[:3] | join('.') }}"
+SERVER_ENDPOINT="{{ ansible_default_ipv4.address }}"
+LISTEN_PORT={{ wireguard_server_port }}
+
+get_available_ip() {
+    local used_ips
+    local new_ip=""
+
+    used_ips=$(grep --no-filename --only-matching --perl-regexp "AllowedIPs\s*=\s*${NETWORK_PREFIX}\.\K\d+" "${PEERS_DIR}"/*/internal.conf 2>/dev/null)
+    used_ips="${used_ips} 1"
+
+    for i in {2..254}; do
+        if ! echo "$used_ips" | grep --word-regexp --quiet "$i"; then
+            new_ip="${NETWORK_PREFIX}.${i}"
+            break
+        fi
+    done
+
+    if [ -z "$new_ip" ]; then
+        echo "Error: No available IP addresses in subnet ${NETWORK_PREFIX}.0/24" >&2
+        exit 1
+    fi
+    echo "$new_ip"
+}
+
+generate_configs() {
+    local username="$1"
+    local peer_ip="$2"
+    
+    local user_dir="${PEERS_DIR}/${username}"
+    local client_conf="${user_dir}/peer.conf"
+    local internal_conf="${user_dir}/internal.conf"
+
+    local client_priv_key=$(wg genkey)
+    local client_pub_key=$(echo "$client_priv_key" | wg pubkey)
+    local psk=$(wg genpsk)
+
+    local server_priv_key=$(grep "PrivateKey" /etc/wireguard/wg0.conf | head -n 1 | awk '{print $3}')
+    local server_pub_key=$(echo "$server_priv_key" | wg pubkey)
+
+    mkdir -p "$user_dir"
+
+    cat <<EOF > "$internal_conf"
+[Interface]
+ListenPort = ${LISTEN_PORT}
+PrivateKey = ${server_priv_key}
+
+[Peer]
+PublicKey = ${client_pub_key}
+AllowedIPs = ${peer_ip}/32
+PresharedKey = ${psk}
+EOF
+
+    cat <<EOF > "$client_conf"
+[Interface]
+PrivateKey = ${client_priv_key}
+Address = ${peer_ip}/{{ wireguard_server_ip | ansible.utils.ipaddr('prefix') }}
+{% if wireguard_dns %}
+DNS = {{ wireguard_dns }}
+{% endif %}
+
+[Peer]
+PublicKey = ${server_pub_key}
+PresharedKey = ${psk}
+Endpoint = ${SERVER_ENDPOINT}:${LISTEN_PORT}
+AllowedIPs = {{ wireguard_peers_allowed_ips }}
+PersistentKeepalive = {{ __wireguard_persistent_keep_alive }}
+EOF
+
+    echo "$internal_conf|$client_conf"
+}
+
+apply_config() {
+    local internal_conf="$1"
+    wg addconf {{ __wireguard_interface }} "$internal_conf"
+}
+
+main() {
+    local username="$1"
+
+    if [ -z "$username" ]; then
+        echo "Usage: $0 <username>"
+        exit 1
+    fi
+
+    if [ -d "${PEERS_DIR}/${username}" ]; then
+        echo "Error: User $username already exists."
+        exit 1
+    fi
+
+    if [ "$EUID" -ne 0 ]; then
+        echo "Error: Script must be run as root (sudo)."
+        exit 1
+    fi
+
+    local new_ip=$(get_available_ip)
+    
+    echo "Generating configs for $username (IP: $new_ip)..."
+    local conf_paths=$(generate_configs "$username" "$new_ip" "$server_ip")
+    
+    local internal_conf="${conf_paths%|*}"
+    local client_conf="${conf_paths#*|}"
+
+    echo "Applying configuration"
+    apply_config "$internal_conf"
+
+    echo "Config saved: ${client_conf}"
+}
+
+main "$@"
