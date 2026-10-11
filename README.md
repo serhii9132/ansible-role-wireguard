@@ -3,6 +3,10 @@ ansible-wireguard
 
 This WireGuard VPN server role supports multi-user access by generating multiple peers with unique IDs, storing all configuration files and keys in the /etc/wireguard/peers/${ID_PEER} directory.
 
+Scripts have been added to manage peer configuration:
+- wg_peer_add - Add a peer to the configuration. To run, use: wg_peer_add ${ID_PEER}
+- wg_peer_remove - Remove a peer to the configuration
+
 Supported platfroms:
 ```
 - Debian 12 (Bookworm)
