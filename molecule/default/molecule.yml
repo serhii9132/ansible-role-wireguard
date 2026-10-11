@@ -13,14 +13,7 @@ platforms:
 
 provisioner:
   name: ansible
-  inventory:
-    group_vars:
-      all:
-        wireguard_server_ip: "10.10.0.1/24"
-        wireguard_server_port: 50500
-        wireguard_dns: "8.8.8.8"
-        wireguard_peers:
-          - "user1"
-          - "user2"
   env:
     ANSIBLE_VERBOSITY: 2
+    ANSIBLE_STDOUT_CALLBACK: yaml
+    ANSIBLE_LOAD_CALLBACK_PLUGINS: 1
