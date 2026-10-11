@@ -12,10 +12,18 @@
   ansible.builtin.import_tasks: peer.yaml
   when: wireguard_peers | length > 0
 
-- name: Apply wg_add_peer from template
+- name: Apply wg_peer_add from template
   ansible.builtin.template:
-    src: wg_add_peer
-    dest: /usr/local/bin/wg_add_peer
+    src: wg_peer_add.j2
+    dest: /usr/local/bin/wg_peer_add
+    owner: root
+    group: root
+    mode: '755'
+
+- name: Apply wg_peer_remove from template
+  ansible.builtin.template:
+    src: wg_peer_remove.j2
+    dest: /usr/local/bin/wg_peer_remove
     owner: root
     group: root
     mode: '755'

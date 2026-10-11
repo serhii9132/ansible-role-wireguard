@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+import os
+import sys
+import glob
+import re
+import subprocess
+import ipaddress
+
+WG_INTERFACE = "{{ __wireguard_interface }}"
+PEERS_DIR = "{{ __wireguard_root_dir_peer_conf }}"
+SERVER_IP_CIDR = "{{ wireguard_server_ip }}"
+LISTEN_PORT = "{{ wireguard_server_port }}"
+SERVER_ENDPOINT = "{{ ansible_default_ipv4.address }}"
+ALLOWED_IPS = "{{ wireguard_peers_allowed_ips }}"
+KEEP_ALIVE = "{{ __wireguard_persistent_keep_alive }}"
+DNS = "{{ wireguard_dns | default('') }}"
+
+def wg_genkey():
+    return subprocess.check_output(['wg', 'genkey'], text=True).strip()
+
+def wg_pubkey(privkey):
+    return subprocess.check_output(['wg', 'pubkey'], input=privkey, text=True).strip()
+
+def wg_genpsk():
+    return subprocess.check_output(['wg', 'genpsk'], text=True).strip()
+
+def get_available_ip():
+    network = ipaddress.IPv4Interface(SERVER_IP_CIDR).network
+    server_ip = str(ipaddress.IPv4Interface(SERVER_IP_CIDR).ip)
+    
+    used_ips = {server_ip}
+    
+    conf_pattern = os.path.join(PEERS_DIR, "*", "internal.conf")
+    for conf_path in glob.glob(conf_pattern):
+        try:
+            with open(conf_path, 'r') as f:
+                match = re.search(r'AllowedIPs\s*=\s*([0-9\.]+)', f.read())
+                if match:
+                    used_ips.add(match.group(1))
+        except Exception as e:
+            print(f"Warning: Could not read {conf_path}: {e}", file=sys.stderr)
+
+    for ip in network.hosts():
+        if str(ip) not in used_ips:
+            return str(ip)
+
+    print(f"Error: No available IP addresses in subnet {network}", file=sys.stderr)
+    sys.exit(1)
+
+def get_server_private_key():
+    server_conf_path = f"/etc/wireguard/{WG_INTERFACE}.conf"
+    try:
+        with open(server_conf_path, 'r') as f:
+            for line in f:
+                if line.strip().startswith('#'):
+                    continue
+                    
+                if 'PrivateKey' in line:
+                    key_part = line.split('=', 1)[1]
+                    clean_key = key_part.split('#')[0].strip()
+                    return clean_key
+    except FileNotFoundError:
+        print(f"Error: Server config {server_conf_path} not found.", file=sys.stderr)
+        sys.exit(1)
+        
+    print(f"Error: PrivateKey not found in {server_conf_path}.", file=sys.stderr)
+    sys.exit(1)
+
+def generate_configs(username, peer_ip):
+    user_dir = os.path.join(PEERS_DIR, username)
+    client_conf = os.path.join(user_dir, "peer.conf")
+    internal_conf = os.path.join(user_dir, "internal.conf")
+
+    try:
+        os.makedirs(user_dir, exist_ok=False)
+    except FileExistsError:
+        print(f"Error: User {username} already exists.")
+        sys.exit(1)
+
+    client_priv_key = wg_genkey()
+    client_pub_key = wg_pubkey(client_priv_key)
+    psk = wg_genpsk()
+
+    server_priv_key = get_server_private_key()
+    server_pub_key = wg_pubkey(server_priv_key)
+    subnet_prefix = ipaddress.IPv4Interface(SERVER_IP_CIDR).network.prefixlen
+
+    with open(internal_conf, 'w') as f:
+        f.write("[Interface]\n")
+        f.write(f"ListenPort = {LISTEN_PORT}\n")
+        f.write(f"PrivateKey = {server_priv_key}\n\n")
+        f.write("[Peer]\n")
+        f.write(f"PublicKey = {client_pub_key}\n")
+        f.write(f"AllowedIPs = {peer_ip}/32\n")
+        f.write(f"PresharedKey = {psk}\n")
+
+    with open(client_conf, 'w') as f:
+        f.write("[Interface]\n")
+        f.write(f"PrivateKey = {client_priv_key}\n")
+        f.write(f"Address = {peer_ip}/{subnet_prefix}\n")
+        if DNS:
+            f.write(f"DNS = {DNS}\n")
+        f.write("\n[Peer]\n")
+        f.write(f"PublicKey = {server_pub_key}\n")
+        f.write(f"PresharedKey = {psk}\n")
+        f.write(f"Endpoint = {SERVER_ENDPOINT}:{LISTEN_PORT}\n")
+        f.write(f"AllowedIPs = {ALLOWED_IPS}\n")
+        f.write(f"PersistentKeepalive = {KEEP_ALIVE}\n")
+
+    return internal_conf, client_conf
+
+def apply_config(internal_conf):
+    subprocess.check_call(['wg', 'addconf', WG_INTERFACE, internal_conf])
+
+def main():
+    if os.geteuid() != 0:
+        print("Error: Script must be run as root (sudo).")
+        sys.exit(1)
+
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <username>")
+        sys.exit(1)
+
+    username = sys.argv[1]
+    
+    print("Finding available IP...")
+    new_ip = get_available_ip()
+    
+    print(f"Generating configs for {username} (IP: {new_ip})...")
+    internal_conf, client_conf = generate_configs(username, new_ip)
+    
+    print("Applying configuration...")
+    apply_config(internal_conf)
+    
+    print(f"Config saved: {client_conf}")
+
+if __name__ == "__main__":
+    main()
